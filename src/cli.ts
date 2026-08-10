@@ -1302,10 +1302,10 @@ async function upgrade(opts?: { platform?: string }) {
   const localVersion = getLocalVersion();
   const tmpDir = join(tmpdir(), `context-mode-upgrade-${Date.now()}`);
 
-  s.start("Cloning mksglu/context-mode");
+  s.start("Cloning vadimsmolev/context-mode (fork)");
   try {
     execFileSync(
-      "git", ["clone", "--depth", "1", "https://github.com/mksglu/context-mode.git", tmpDir],
+      "git", ["clone", "--depth", "1", "https://github.com/vadimsmolev/context-mode.git", tmpDir],
       { stdio: "pipe", timeout: 30000 },
     );
     s.stop("Downloaded");
