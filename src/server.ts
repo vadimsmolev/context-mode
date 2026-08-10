@@ -62,6 +62,8 @@ import {
   resolveProjectScope,
 } from "./search/ctx-search-schema.js";
 import { FloodGuard } from "./search/flood-guard.js";
+import { searchWeb } from "./web-search.js";
+import { loadWebSearchSettings } from "./web-config.js";
 import { buildNodeCommand, type HookAdapter, type PlatformId, isInProcessPluginPlatform } from "./adapters/types.js";
 import { detectPlatform, getSessionDirSegments } from "./adapters/detect.js";
 import { parseCodexContextModePluginRoot } from "./adapters/codex/index.js";
@@ -941,7 +943,7 @@ function trackResponse(toolName: string, response: ToolResult): ToolResult {
   // was 0/124454 in prod). Drop the count into a marker keyed by the session
   // DB; the next ordinary-tool PostToolUse consumes it and emits a forwardable
   // bytes_retrieved event. Off the hot path; never throws.
-  if (toolName === "ctx_search" || toolName === "ctx_fetch_and_index") {
+  if (toolName === "ctx_search" || toolName === "ctx_fetch_and_index" || toolName === "ctx_web_search") {
     setImmediate(() => appendRetrievalBytes(getSessionDbPath(), bytes));
   }
 
@@ -3285,6 +3287,19 @@ export function classifyIp(rawIp: string): "block" | "private" | "public" {
   return "public";
 }
 
+// Browser-backed fetch (Playwright + stealth) — lazily loaded so the heavy
+// playwright-extra/stealth import chain only pays its cost the first time a
+// fetch actually needs it, and so shutdown (below) never triggers a fresh
+// import just to check whether a browser needs closing.
+type BrowserFetchModule = typeof import("./browser-fetch.js");
+let _browserFetchModule: BrowserFetchModule | null = null;
+async function getBrowserFetchModule(): Promise<BrowserFetchModule> {
+  if (!_browserFetchModule) {
+    _browserFetchModule = await import("./browser-fetch.js");
+  }
+  return _browserFetchModule;
+}
+
 async function fetchOneUrl(url: string, source: string | undefined, force: boolean | undefined, ttl: number | undefined): Promise<FetchOneResult> {
   // SSRF guard — reject file://, javascript:, loopback, RFC1918, IMDS, link-local
   // BEFORE any cache lookup or subprocess spawn. Even cached entries shouldn't
@@ -3311,6 +3326,36 @@ async function fetchOneUrl(url: string, source: string | undefined, force: boole
         return { kind: "cached", label: meta.label, chunkCount: meta.chunkCount, estimatedBytes, ageStr, ttlStr: formatFetchTtl(cacheTtlMs) };
       }
       // Stale — fall through to re-fetch silently
+    }
+  }
+
+  // Default fetch path: headless Chromium (Playwright + stealth) — renders JS,
+  // carries a real UA, survives basic anti-bot checks. Opt out with
+  // CTX_BROWSER_FETCH=0 to fall back to the legacy UA-less sandbox fetch below
+  // (kept for tests/environments where launching a browser isn't viable).
+  if (process.env.CTX_BROWSER_FETCH !== "0") {
+    try {
+      const { browserFetchPage } = await getBrowserFetchModule();
+      const res = await browserFetchPage({ url, source: source ?? url });
+      if (!res.ok) {
+        return {
+          kind: "fetch_error",
+          url,
+          error: res.reason ? `${res.error}: ${res.reason}` : res.error,
+          reason: res.error === "empty" ? "empty" : "exit",
+        };
+      }
+      // innerText has no markdown structure — collapse runaway blank lines
+      // (menus/widgets often leave 5-10 consecutive newlines) before indexing.
+      const markdown = res.text.replace(/\n{3,}/g, "\n\n");
+      return { kind: "fetched", url, source, markdown, header: "__CM_CT__:text" };
+    } catch (err: unknown) {
+      return {
+        kind: "fetch_error",
+        url,
+        error: err instanceof Error ? err.message : String(err),
+        reason: "throw",
+      };
     }
   }
 
@@ -3420,19 +3465,19 @@ server.registerTool(
       idempotentHint: false,
       openWorldHint: true,
     },
-    description: `Fetches URL content, converts HTML to markdown (JSON is chunked by key paths, plain text indexed directly), persists it in a searchable knowledge base, and returns a small preview window per source. The raw page bytes never enter your conversation — they live in storage and you retrieve any section on-demand via ctx_search.
+    description: `Fetches URL content, persists it in a searchable knowledge base, and returns a small preview window per source. By default the fetch runs through a headless Chromium browser (JS-rendered pages, real UA + stealth fingerprint, survives common anti-bot/WAF checks) and indexes the page's visible plain text. Set \`CTX_BROWSER_FETCH=0\` to use the legacy plain HTTP fetch instead — no JS rendering, no UA, HTML converted to markdown; JSON is chunked by key paths on either fetch path. The raw page bytes never enter your conversation — they live in storage and you retrieve any section on-demand via ctx_search.
 
 Caching: every fetch is cached on disk and reused for repeat calls within the TTL window. The default TTL is 24 hours; override per-call with the \`ttl\` parameter (milliseconds, \`ttl: 0\` bypasses cache like \`force: true\`). Stored content older than 14 days is cleaned up on startup.
 
 WHEN:
   - You need web content (docs, changelogs, API references, spec pages) and the raw page bytes should NOT enter your conversation
+  - The page is SPA-rendered (JavaScript-required to materialize content) or sits behind a basic anti-bot check — the default browser fetch handles both
   - Multi-URL research (library evaluation, migration scans, doc comparisons): pass the \`requests\` array and a \`concurrency\` value 2-8 for parallel I/O
   - You want repeat lookups against the same URL to be cheap (TTL cache hits return only a hint, no re-fetch)
   - You want a long-lived cache window (override \`ttl\` upward for stable specs) or a guaranteed-fresh fetch (\`ttl: 0\` or \`force: true\`)
 
 WHEN NOT:
   - You already have the content locally — store it via the inline index tool
-  - The page is SPA-rendered (JavaScript-required to materialize content) — this is a plain HTTP fetch, no headless browser
 
 RETURNS:
   Per-source preview windows extracted around indexable headings plus indexing metadata (chunk counts, source labels, cache state). Raw content is NOT echoed back — retrieve any section on-demand via ctx_search(source: "<label>"). Concurrency parallelizes the fetch phase up to your chosen value (capped by the host's logical CPU count); the FTS5 write phase always runs serially because SQLite is a single-writer store. Net latency = max(fetch latency across the pool) + sum(per-source index write time). Cache hits skip both phases and return a small freshness hint instead of re-fetching. Use 4-8 for stable I/O-bound batches; lower the value when the target host enforces a per-IP rate limit you cannot raise.
@@ -3667,6 +3712,93 @@ EXAMPLE: ctx_fetch_and_index(
     return trackResponse("ctx_fetch_and_index", {
       content: [{ type: "text" as const, text }],
       isError: errorCount === batch.length, // only mark error if every URL failed
+    });
+  },
+);
+
+// ─────────────────────────────────────────────────────────
+// Tool: web_search
+// ─────────────────────────────────────────────────────────
+
+server.registerTool(
+  "ctx_web_search",
+  {
+    title: "Web Search",
+    // #846: hits an external search API (open world), read-only against it —
+    // results can change between identical calls, so not idempotent.
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    description: `Searches the live web and returns a compact ranked list of results (title, URL, dated snippet) — nothing is written to the knowledge base. Cascades Brave Search → SearXNG (\`backend: "auto"\`, the default); pin a specific backend to skip the cascade. Brave calls are rate-limited to respect its per-second quota.
+
+WHEN:
+  - You need current information not already in the knowledge base (news, prices, recent releases, anything time-sensitive)
+  - You want a short list of candidate URLs before deciding what to fetch in full via ctx_fetch_and_index
+
+WHEN NOT:
+  - You already know the URL — go straight to ctx_fetch_and_index
+  - The answer likely already lives in the knowledge base — try ctx_search first
+
+RETURNS:
+  Top-N results as \`N. Title — URL\` followed by a dated snippet line. On total failure, an error listing every backend tried and why.
+
+EXAMPLE: ctx_web_search(query: "context-mode MCP server release notes", count: 5)`,
+    inputSchema: z.object({
+      query: z.string().min(1).describe("Search query"),
+      count: z
+        .coerce.number()
+        .int()
+        .min(1)
+        .max(10)
+        .optional()
+        .default(5)
+        .describe("Number of results to return (1-10, default: 5)"),
+      backend: z
+        .enum(["auto", "brave", "searxng"])
+        .optional()
+        .default("auto")
+        .describe("Search backend: \"auto\" cascades Brave → SearXNG (default); pin \"brave\" or \"searxng\" to skip the cascade"),
+    }),
+  },
+  async ({ query, count, backend }) => {
+    const settings = loadWebSearchSettings();
+    const outcome = await searchWeb(query, {
+      backend,
+      count,
+      config: {
+        searxngUrl: settings.searxngUrl,
+        braveApiKey: settings.braveApiKey,
+      },
+    });
+
+    if (outcome.status === "error") {
+      return trackResponse("ctx_web_search", {
+        content: [{
+          type: "text" as const,
+          text: `Web search failed. Tried: ${outcome.backend_tried.join(", ") || "none"}. Reason: ${outcome.reason}`,
+        }],
+        isError: true,
+      });
+    }
+
+    if (outcome.results.length === 0) {
+      return trackResponse("ctx_web_search", {
+        content: [{
+          type: "text" as const,
+          text: `No results for "${query}" (backend: ${outcome.backend}).`,
+        }],
+      });
+    }
+
+    const lines = outcome.results.map((r, i) =>
+      `${i + 1}. ${r.title} — ${r.url}${r.snippet ? `\n   ${r.snippet}` : ""}`
+    );
+    const text = [`Web search (${outcome.backend}): "${query}"`, "", ...lines].join("\n");
+    return trackResponse("ctx_web_search", {
+      content: [{ type: "text" as const, text }],
     });
   },
 );
@@ -4343,7 +4475,7 @@ server.registerTool(
     } else {
       // Inline fallback: neither CLI file exists (e.g. marketplace installs).
       // Generate a self-contained node -e script that performs the upgrade.
-      const repoUrl = "https://github.com/mksglu/context-mode.git";
+      const repoUrl = "https://github.com/vadimsmolev/context-mode.git";
       // Write inline script to a temp .mjs file — avoids quote-escaping issues
       // across cmd.exe, PowerShell, and bash (node -e '...' breaks on Windows).
       const scriptLines = [
@@ -4865,6 +4997,9 @@ async function main() {
 
   // Clean up own DB + backgrounded processes + preload script on shutdown
   const shutdown = () => {
+    // Sync path (process "exit" — no awaiting): best-effort browser close.
+    // Only fires if browser-fetch was actually loaded; never imports fresh here.
+    if (_browserFetchModule) { _browserFetchModule.closeBrowser().catch(() => {}); }
     executor.cleanupBackgrounded();
     if (_store) _store.close(); // persist DB for --continue sessions
     try { unlinkSync(CM_FS_PRELOAD); } catch { /* best effort */ }
@@ -4874,6 +5009,9 @@ async function main() {
     if (sentinelRefresh) clearInterval(sentinelRefresh);
   };
   const gracefulShutdown = async () => {
+    // Close the headless browser first (if browser-fetch was ever loaded) so
+    // the Chromium subprocess doesn't linger past our own exit.
+    if (_browserFetchModule) { await _browserFetchModule.closeBrowser().catch(() => {}); }
     // Final stats flush — bypass throttle so the last 0-500ms of
     // bytes_indexed / bytes_returned aren't silently lost on SIGTERM/SIGINT
     // (PR #401 grill-me review B1: persistStats early-returns inside throttle

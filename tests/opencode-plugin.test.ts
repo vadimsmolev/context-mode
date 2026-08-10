@@ -100,6 +100,7 @@ describe("ContextModePlugin", () => {
         "ctx_search",
         "ctx_stats",
         "ctx_upgrade",
+        "ctx_web_search",
       ]);
     });
 

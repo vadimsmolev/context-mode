@@ -93,6 +93,11 @@ describe("ctx_fetch_and_index cleanup — behaviour", () => {
   let baseUrl: string;
 
   beforeAll(async () => {
+    // These tests mirror the legacy sandbox-fetch cleanup pattern directly
+    // (not the browser-fetch path added in CTX_BROWSER_FETCH default mode) —
+    // pin the legacy path explicitly so intent stays correct if this suite
+    // ever grows a real fetchOneUrl call.
+    process.env.CTX_BROWSER_FETCH = "0";
     httpServer = createServer((req, res) => {
       if (req.url === "/empty") {
         res.writeHead(200, { "content-type": "text/plain" });
