@@ -19,7 +19,10 @@ import { homedir } from "node:os";
 const FORK = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const HOME = homedir();
 const CACHE_PARENT = join(HOME, ".claude", "plugins", "cache", "claude-context-mode", "context-mode");
-const BACKUP = join(HOME, ".claude", "plugins", "cache", "claude-context-mode", "context-mode-backup");
+// Claude Code prunes unknown dirs inside plugins/cache on session start
+// (verified 2026-08-10: a context-mode-backup/ dir there was GC'd on first
+// restart after deploy) — keep backups outside the cache tree.
+const BACKUP = "/mnt/d/Work/Claude/cc-web-tools/backup";
 const IP_PATH = join(HOME, ".claude", "plugins", "installed_plugins.json");
 const SETTINGS_PATH = join(HOME, ".claude", "settings.json");
 

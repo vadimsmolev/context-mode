@@ -5,13 +5,15 @@
  * registry's installPath. The deployed version dir is left in place (harmless
  * once nothing references it; delete manually if desired).
  */
-import { cpSync, readFileSync, readdirSync } from "node:fs";
+import { cpSync, readFileSync, readdirSync, existsSync, mkdirSync } from "node:fs";
 import { execSync } from "node:child_process";
-import { join } from "node:path";
+import { join, dirname, basename } from "node:path";
 import { homedir } from "node:os";
 
 const HOME = homedir();
-const BACKUP = join(HOME, ".claude", "plugins", "cache", "claude-context-mode", "context-mode-backup");
+// Claude Code prunes unknown dirs inside plugins/cache on session start
+// (verified 2026-08-10) — backups live outside the cache tree.
+const BACKUP = "/mnt/d/Work/Claude/cc-web-tools/backup";
 const IP_PATH = join(HOME, ".claude", "plugins", "installed_plugins.json");
 const SETTINGS_PATH = join(HOME, ".claude", "settings.json");
 
@@ -35,6 +37,15 @@ for (const [key, value] of Object.entries(ip.plugins ?? {})) {
   for (const entry of Array.isArray(value) ? value : [value]) {
     if (entry?.installPath) { installPath = entry.installPath; break; }
   }
+}
+if (installPath && !existsSync(installPath)) {
+  // The old version dir was moved out of the cache after the fork went green;
+  // restore it from the tarball before npm needs it.
+  const tarball = join(BACKUP, `${basename(installPath)}.tar.gz`);
+  if (!existsSync(tarball)) throw new Error(`${installPath} missing and no ${tarball} to restore it from`);
+  mkdirSync(dirname(installPath), { recursive: true });
+  execSync(`tar -xzf "${tarball}" -C "${dirname(installPath)}"`, { stdio: "inherit" });
+  console.log(`rollback-fork: restored ${installPath} from ${tarball}`);
 }
 if (installPath) {
   execSync(`npm install -g "${installPath}" --no-audit --no-fund`, { stdio: "inherit" });
