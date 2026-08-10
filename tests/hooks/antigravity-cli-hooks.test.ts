@@ -137,24 +137,37 @@ describe("antigravity-cli hooks", () => {
     expect(parsed.reason).toContain("ctx_execute");
   });
 
-  test("PreToolUse leaves unmapped list_dir and search_web payloads alone", () => {
-    for (const [name, args] of [
-      ["list_dir", { path: "/repo" }],
-      ["search_web", { query: "context-mode" }],
-    ] as const) {
-      cleanupMarkers();
-      const r = dispatch(
-        "pretooluse.mjs",
-        {
-          conversationId: SID,
-          workspacePaths: [CWD],
-          toolCall: { name, args },
-        },
-        home,
-      );
-      expect(r.status).toBe(0);
-      expect(r.stdout).toBe("");
-    }
+  test("PreToolUse leaves unmapped list_dir payloads alone", () => {
+    const r = dispatch(
+      "pretooluse.mjs",
+      {
+        conversationId: SID,
+        workspacePaths: [CWD],
+        toolCall: { name: "list_dir", args: { path: "/repo" } },
+      },
+      home,
+    );
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("");
+  });
+
+  // Fork: search_web maps to WebSearch, which is now denied + redirected to
+  // ctx_web_search (same treatment WebFetch gets).
+  test("PreToolUse denies search_web with ctx_web_search redirect", () => {
+    const r = dispatch(
+      "pretooluse.mjs",
+      {
+        conversationId: SID,
+        workspacePaths: [CWD],
+        toolCall: { name: "search_web", args: { query: "context-mode" } },
+      },
+      home,
+    );
+    expect(r.status).toBe(0);
+    const parsed = JSON.parse(r.stdout.trim());
+    expect(parsed).toMatchObject({ decision: "deny" });
+    expect(parsed.reason).toContain("ctx_web_search");
+    expect(parsed.reason).toContain("context-mode");
   });
 
   test("payload normalization covers agy's basic native tool names", () => {

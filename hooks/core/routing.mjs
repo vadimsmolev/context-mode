@@ -889,6 +889,23 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
     }, mcpToolsAvailable);
   }
 
+  // ─── WebSearch: deny + redirect to ctx_web_search (fork) ───
+  if (canonical === "WebSearch") {
+    const query = toolInput.query ?? "";
+    return mcpRedirect({
+      action: "deny",
+      reason: `context-mode: WebSearch redirected. Call ${t("ctx_web_search")}(query: "${query}") to search the live web — the Brave → SearXNG cascade returns a compact ranked list (title, URL, dated snippet) instead of the native search's verbose payload. Then ${t("ctx_fetch_and_index")}(url, source) a promising result and ${t("ctx_search")}(queries: [...]) to read it without the raw page bytes entering your conversation. Retry the same call on a transient DNS error (EAI_AGAIN, ETIMEDOUT, ENETUNREACH).`,
+      redirectMeta: {
+        tool: "WebSearch",
+        type: "websearch-redirected",
+        // 8192 = typical native web-search result payload bytes prevented
+        // from entering the model's context window.
+        bytesAvoided: 8192,
+        commandSummary: String(query).slice(0, 200),
+      },
+    }, mcpToolsAvailable);
+  }
+
   // ─── Agent: inject context-mode routing into subagent prompts ───
   // Subagents cannot use ctx commands (stats/doctor/upgrade/purge) — omit that section (#233)
   if (canonical === "Agent") {

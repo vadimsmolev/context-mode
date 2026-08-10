@@ -274,6 +274,25 @@ describe("WebFetch", () => {
   });
 });
 
+describe("WebSearch (fork: deny + redirect to ctx_web_search)", () => {
+  test("WebSearch + query: denied with ctx_web_search redirect", () => {
+    const result = runHook({
+      tool_name: "WebSearch",
+      tool_input: { query: "typescript best practices" },
+    });
+    assertDeny(result, "web_search");
+    const parsed = JSON.parse(result.stdout);
+    assert.ok(
+      parsed.hookSpecificOutput.permissionDecisionReason.includes("typescript best practices"),
+      "Expected original query in reason",
+    );
+    assert.ok(
+      /Call .*ctx_web_search/.test(parsed.hookSpecificOutput.permissionDecisionReason),
+      "Expected explicit ctx_web_search call instruction in reason",
+    );
+  });
+});
+
 describe("Task (#241: no longer routed)", () => {
   test("Task tool returns empty stdout (passthrough, no routing)", () => {
     const result = runHook({
@@ -347,14 +366,6 @@ describe("Passthrough Tools", () => {
     const result = runHook({
       tool_name: "Glob",
       tool_input: { pattern: "**/*.ts" },
-    });
-    assertPassthrough(result);
-  });
-
-  test("WebSearch: passthrough", () => {
-    const result = runHook({
-      tool_name: "WebSearch",
-      tool_input: { query: "typescript best practices" },
     });
     assertPassthrough(result);
   });

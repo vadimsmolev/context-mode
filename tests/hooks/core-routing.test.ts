@@ -492,6 +492,46 @@ describe("routePreToolUse", () => {
     });
   });
 
+  // ─── WebSearch routing (fork: deny + redirect to ctx_web_search) ───
+  describe("WebSearch tool", () => {
+    it("returns deny action with ctx_web_search redirect", () => {
+      const result = routePreToolUse("WebSearch", {
+        query: "vitest documentation",
+      });
+      expect(result).not.toBeNull();
+      expect(result!.action).toBe("deny");
+      expect(result!.reason).toContain("WebSearch redirected");
+      expect(result!.reason).not.toContain("WebSearch blocked");
+      expect(result!.reason).toContain("web_search");
+      expect(result!.reason).toMatch(/retry/i);
+    });
+
+    it("includes the query in deny reason", () => {
+      const query = "typescript best practices 2026";
+      const result = routePreToolUse("WebSearch", { query });
+      expect(result).not.toBeNull();
+      expect(result!.reason).toContain(query);
+    });
+
+    it("allows WebSearch when MCP server not ready (#230)", () => {
+      try { unlinkSync(mcpSentinel); } catch {}
+      const result = routePreToolUse("WebSearch", { query: "anything" });
+      expect(result).toBeNull();
+    });
+
+    it("passes WebSearch through when the caller context cannot invoke ctx_* tools (#794)", () => {
+      const result = routePreToolUse(
+        "WebSearch",
+        { query: "anything" },
+        undefined,
+        "claude-code",
+        "subagent-websearch",
+        { mcpToolsAvailable: false },
+      );
+      expect(result).toBeNull();
+    });
+  });
+
   // ─── MCP readiness: all redirects degrade gracefully (#230) ───
 
   describe("MCP readiness graceful degradation (#230)", () => {
@@ -519,6 +559,7 @@ describe("routePreToolUse", () => {
         ["Bash", { command: "node -e \"fetch('https://example.com')\"" }],
         ["Bash", { command: "./gradlew build" }],
         ["WebFetch", { url: "https://example.com" }],
+        ["WebSearch", { query: "typescript docs" }],
       ] as const;
 
       for (const [tool, input] of cases) {
@@ -836,12 +877,6 @@ describe("routePreToolUse", () => {
       expect(result).toBeNull();
     });
 
-    it("returns null for WebSearch", () => {
-      const result = routePreToolUse("WebSearch", {
-        query: "vitest documentation",
-      });
-      expect(result).toBeNull();
-    });
   });
 
   // ─── External MCP tools (#529) ──────────────────────────

@@ -57,6 +57,7 @@ export const EXTERNAL_MCP_MATCHER_PATTERN = "mcp__";
 export const PRE_TOOL_USE_MATCHERS = [
   "Bash",
   "WebFetch",
+  "WebSearch",
   "Read",
   "Grep",
   "Agent",
